@@ -1,0 +1,318 @@
+#!/usr/bin/python
+
+# Copyright 2017 Mark Krenz (deltaray@slugbug.org)
+# Released under the terms of GNU GPLv3 license
+
+import sys
+import signal
+import re
+import os
+import getopt
+import time
+import curses
+import curses.textpad
+from roku import Roku
+
+
+# User configurable hotkeys.
+# Don't change the descriptions, just the keys.
+keyconfig = {
+    'Help':   [curses.KEY_F1],
+    'Up':     [curses.KEY_UP],
+    'Down':   [curses.KEY_DOWN],
+    'Left':   [curses.KEY_LEFT],
+    'Right':  [curses.KEY_RIGHT],
+    'Back':   ['b', curses.KEY_BACKSPACE],
+    'Select': [' ', 10], # Space or Enter (most keyboards).
+    'Enter':  ['e'],
+    'Home':   ['h', curses.KEY_HOME],
+    'Info':   ['i','*'],
+    'Replay': ['r'],
+    'Search': ['s'],
+    'Forward': ['>', '.'],
+    'Reverse': ['<', ','],
+    'Quit This Program': ['q', ''],
+    'Youtube Search': ['y'],
+}
+
+
+
+roku_ip = sys.argv[1]
+
+roku = Roku(roku_ip)
+
+def exitprogram(exitmsg):
+    curses.nocbreak()
+    stdscr.keypad(0)
+    curses.echo()
+    curses.endwin()
+    print exitmsg
+    sys.exit(0)
+    return True
+
+def signal_handler(signalnumber, frame):
+    exitprogram()
+    return True
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
+
+stdscr = curses.initscr()
+curses.start_color()
+curses.noecho()
+curses.halfdelay(1)
+curses.cbreak()
+stdscr.keypad(1)
+
+
+curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLACK)
+curses.init_pair(2, curses.COLOR_BLACK, curses.COLOR_WHITE)
+curses.init_pair(3, curses.COLOR_MAGENTA, curses.COLOR_BLACK)
+curses.init_pair(4, curses.COLOR_RED, curses.COLOR_BLACK)
+curses.init_pair(5, curses.COLOR_BLUE, curses.COLOR_BLACK)
+curses.init_pair(6, curses.COLOR_GREEN, curses.COLOR_BLACK)
+curses.init_pair(7, curses.COLOR_YELLOW, curses.COLOR_BLACK)
+
+
+c = -1
+# Roku commands.
+# ['back', 'backspace', 'down', 'enter', 'forward', 'home', 'info', 'left', 'literal', 'play', 'replay', 'reverse', 'right', 'search', 'select', 'up']
+
+# WARNING
+# Don't use any other Roku remote during a typing operation. You can really
+# mess things up and and may even break your Roku or Youtube account.
+
+# Also don't use this Youtube search feature with the roku express, it's too slow
+# and drops commands, which could have unexpected results such as signing you
+# out of Youtube. :(
+
+
+# Youtube keyboard
+#  A - G   <X
+#  H - N   CLEAR
+#  O - U   &123
+#  V - Z - '
+#  SPACE -> SEARCH
+
+# Youtube numbers
+# 1 2 3 & # ( )  <x
+# 4 5 6 @ ! ? :  CLEAR
+# 7 8 9 0 . _ "  ABC
+# SPACE  -> SEARCH
+
+# So the keyboard shows upper case, but the output is lowercase. :P
+# The | and / are charset change keys.
+yt_keyarray = [
+   [
+    ['a','b','c','d','e','f','g',''],
+    ['h','i','j','k','l','m','n',''],
+    ['o','p','q','r','s','t','u','|'],
+    ['v','w','x','y','z','-',"'"],
+    [' '],
+   ],
+   [
+    ['1','2','3','&','#','(',')',''],
+    ['4','5','6','@','!','?',':',''],
+    ['7','8','9','0','.','_','"','/'],
+   ]
+]
+
+# set,y,x
+cursor_location = [0,0,0]
+
+def reset_cursor():
+    global cursor_location
+    for i in range(0,4):
+        roku.up()
+        time.sleep(0.1)
+    for i in range(0,8):
+        roku.right()
+        time.sleep(0.1)
+    cursor_location = [0,0,7] # I didn't plan that.
+    return True
+
+char_indexes = {'|': [0,2,7], '/': [1,2,7]}
+charstring = ""
+
+def generate_locations():
+    global char_indexes
+    global yt_keyarray
+    global charstring
+    for s in 0,1:
+        for y in range(0,len(yt_keyarray[s])):
+            for x in range(0,len(yt_keyarray[s][y])):
+                charstring += yt_keyarray[s][y][x]
+                char_indexes[yt_keyarray[s][y][x]] = [s,y,x]
+
+generate_locations()
+
+
+# Based on being in the reset position (backspace), this 
+# will move the cursor to the character and press it.
+def press_character(char, press = True):
+    char = char.lower()
+    global cursor_location
+    movedelay = 0.2 # 0.25 is probably the lowest safe value for a Roku Express from my testing.
+    #movedelay = 0.07 # 0.07 is about the lowest value I can use on a Roku 3. 
+    if char != '|' and char != '/': # Special short circuit for charset change.
+        if cursor_location[0] != char_indexes[char][0] and cursor_location[0] == 0: # Change sets.
+            if cursor_location[1] == 3:     # If we're in the 4th row, move to 's' first
+                press_character('s', False) # to avoid not going right enough before going up
+            press_character('|') # Go to number set.
+            cursor_location = [1,2,7]
+
+        elif cursor_location[0] != char_indexes[char][0] and cursor_location[0] == 1:
+            press_character('/') # Go to letter set.
+            cursor_location = [0,2,7]
+
+    curs_set = cursor_location[0]
+    curs_y = cursor_location[1]
+    curs_x = cursor_location[2]
+    char_y = char_indexes[char][1]
+    char_x = char_indexes[char][2]
+
+    xdiff = curs_x - char_x
+    if xdiff > 0:
+        for x in range(0,xdiff):
+            roku.left()
+            time.sleep(movedelay)
+    elif xdiff < 0:
+        for x in range(0,abs(xdiff)):
+            roku.right()
+            time.sleep(movedelay)
+
+    ydiff = curs_y - char_y
+    if ydiff > 0:
+        for y in range(0,ydiff):
+            roku.up()
+            time.sleep(movedelay)
+    elif ydiff < 0:
+        for y in range(0,abs(ydiff)):
+            roku.down()
+            time.sleep(movedelay)
+    # else do nothing. 
+
+    if (press == True):
+        roku.select()
+    time.sleep(movedelay) 
+
+    # Because the space is in all columns, it's
+    # Just easier to move the cursor up off it
+    # After we're done. Maybe I'll come
+    # up with a better solution later.
+    if char == ' ':
+        roku.up()
+        time.sleep(movedelay) 
+        curs_set = 0
+        char_y = 3
+        char_x = 0
+        cursor_location = [curs_set,char_y,char_x]
+        mainwin.addstr(19,2,  "{0:<30}".format(str(cursor_location)))
+        mainwin.refresh()
+    else:    
+        cursor_location = [curs_set,char_y,char_x]
+
+    return True
+
+def typestring(string):
+    reset_cursor()
+    for i in range(0,len(string)):
+        press_character(string[i])
+    return True
+
+def input_box():
+    return True
+
+#############################################################
+
+term_height, term_width = stdscr.getmaxyx()
+mainwin = curses.newwin(term_height,term_width,0,0)
+mainwin.border()
+
+lastkeypressed = 32
+
+try:
+    while 1:
+        mainwin.addstr(2,2, "<<< Roku Remote >>>")
+        mainwin.addstr(5,3, "Move   - Arrow Keys")
+        mainwin.addstr(6,3,  "Select - <ENTER>")
+        mainwin.addstr(7,3,  "Enter  - NOT SETUP")
+        mainwin.addstr(8,3,  "Home   - h or <HOME>")
+        mainwin.addstr(9,3,  "Info   - i or *")
+        mainwin.addstr(10,3,  "Back   - b")
+        mainwin.addstr(11,3, "Replay - r")
+        mainwin.addstr(12,3, "Search - s")
+        mainwin.addstr(12,3, "Youtube Search type - y")
+        mainwin.addstr(12,3, "Forward - > or .")
+        mainwin.addstr(12,3, "Reverse - < or ,")
+        mainwin.addstr(14,3,  "Quit this program - <q> or <Ctrl-x>")
+        mainwin.addstr(16,3,  "Last key pressed: {0:20}".format(str(curses.keyname(lastkeypressed))))
+# This was for debugging.
+#        mainwin.addstr(19,2,  "{0:<30}".format(str(cursor_location)))
+        mainwin.refresh()
+        stdscr.refresh()
+
+        if (c != -1):
+            c = stdscr.getch()
+            lastkeypressed = c
+        else:
+            c = 0
+
+        if c == curses.KEY_UP:
+            roku.up()
+        elif c == curses.KEY_DOWN:
+            roku.down()
+            lastkeypressed = c
+        elif c == curses.KEY_LEFT:
+            roku.left()
+        elif c == curses.KEY_RIGHT:
+            roku.right()
+        elif c == 10 or c == curses.KEY_ENTER:
+            roku.select()
+        elif c == ord('y'): # Youtube search
+            ytsearch = curses.newwin(6, 70, 10, 5)
+            ytsearch.bkgd(curses.color_pair(3))
+            ytsearch.border()
+            ytsearch.addstr(1, 1, "Make sure your cursor is on the Roku's Youtube keyboard first.", curses.color_pair(1))
+            ytsearch.addstr(2, 1, "Enter a search and press <Enter> when done.", curses.color_pair(1))
+
+            ytsearchedit = curses.newwin(1,64, 14, 8)
+            ytsearchedit.bkgd(curses.color_pair(2))
+            ytsearch.refresh()
+            ytsearchedit.refresh()
+            tb = curses.textpad.Textbox(ytsearchedit)
+            text = tb.edit().rstrip()
+            curses.beep()
+            mainwin.addstr(30,5, "You searched for '" + text.encode('utf_8') + "'")
+            mainwin.redrawln(10,6)
+            mainwin.refresh()
+            typestring(text.encode('utf_8'))
+        elif c == ord('b'): # This works better than Esc.
+            roku.back()
+        elif c == ord('h') or c == curses.KEY_HOME:
+            roku.home()
+        elif c == ord('*') or c == ord('i'):
+            roku.info()
+        elif c == ord('s'):
+            roku.search()
+        elif c == ord('i'):
+            roku.info()
+        elif c == curses.KEY_BACKSPACE:
+            roku.backspace()
+        elif c == ord('r'):
+            roku.replay()
+        elif c == ord(',') or c == ord('<'):
+            roku.reverse()
+        elif c == ord('.') or c == ord('>'):
+            roku.forward()
+        elif c == ord('') or c == ord('q'):
+            exitprogram()
+            curses.nocbreak(); stdscr.keypad(0); curses.echo()
+            curses.endwin()
+            sys.exit(0)
+
+        # Unimplemented: Literal (needs dialog box)
+
+except Exception as detail:
+    exitprogram('Failure in while loop: ' + str(detail))
